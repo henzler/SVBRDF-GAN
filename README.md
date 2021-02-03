@@ -15,6 +15,12 @@ Yezi Zhao, [Beibei Wang](https://wangningbei.github.io/)*, Yanning Xu, Zheng Zen
 - Python 3.6, numpy, Tensorflow-gpu 1.4
 - 8G GPU Memory (test on GTX 1070)
 
+```
+conda create --name svbrdf-gan python=3.7
+conda install tensorflow-gpu
+
+```
+
 ## Usage
 
 The following command will train the network on a captured image, and output intermediate result during training as well as recovered and synthesized SVBRDF maps of a cental cropped tile of the captured image (considering gpu memory).

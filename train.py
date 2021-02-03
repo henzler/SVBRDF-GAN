@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 
+# !!!If running TF v > 2.0 uncomment those lines (also remove the tensorflow import on line 5):!!!
+# import tensorflow.compat.v1 as tf
+# tf.disable_v2_behavior()
 import tensorflow as tf
 import net
 import os
@@ -9,12 +12,13 @@ import argparse
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--input_dir", required=True)
-parser.add_argument("--log_dir", required=True)
 parser.add_argument("--output_dir", required=True)
 
-parser.add_argument("--crop_size", type = int, default=800)
-parser.add_argument("--img_h", type = int, default=1224)
-parser.add_argument("--img_w", type = int, default=1632)
+parser.add_argument("--crop_size", type = int, default=192)
+# parser.add_argument("--img_h", type = int, default=1224)
+parser.add_argument("--img_h", type = int, default=384)
+parser.add_argument("--img_w", type = int, default=512)
+# parser.add_argument("--img_w", type = int, default=1632)
 parser.add_argument("--max_step", type = int, default=20000)
 parser.add_argument("--seed", type = int, default=24)
 
@@ -29,6 +33,7 @@ inputsize=128
 BATCH_SIZE = 1
 Examples = collections.namedtuple("Examples", "iterator, concats")
 lr=0.00002
+# lr=0.0001
 #%%
 def deprocess(image):
     # [-1, 1] => [0, 1]
@@ -76,8 +81,15 @@ def concat_inputs(filename,kernel1):
     flash_input = tf.image.convert_image_dtype(flash_input, dtype=tf.float32)
     flash_input = tf.expand_dims(flash_input**2.2,axis=0)
 
+    flash_input = tf.identity(flash_input)
+    flash_input.set_shape([1, None, None, 3])
+
+    flash_input = tf.image.resize_images(flash_input, size=[args.img_w, args.img_h])
+
+
     initdiffuse = normalize_aittala(flash_input,kernel1)
-    wv,inten=net.generate_vl(args.img_w,args.img_h)
+    wv,inten=net.generate_vl(args.img_h,args.img_w)
+
     img_tobe_sliced = tf.concat([flash_input,wv,inten,initdiffuse],axis=-1)
     return img_tobe_sliced
 
@@ -96,25 +108,24 @@ def load_examples(img_tobe_sliced,tilesize=256):
 def save_outputs(predictions,examples_inputs=None,net_rerender=None):
     
     n,d,r,s = tf.split(predictions, nbTargets, axis=3)#4 * [batch, 256,256,3]
-    gammad = d**(1/2.2)
-    outputs_list=[n,gammad,r,s]
+    # gammad = d**(1/2.2)
+    outputs_list=[n,d,r,s]
     outputs = tf.stack(outputs_list, axis = 1) #[batch, 4,256,256,3]
     shape = tf.shape(outputs)
     newShape = tf.concat([[shape[0] * shape[1]], shape[2:]], axis=0)
     outputs_reshaped = tf.reshape(outputs, newShape)
     converted_outputs = tf.image.convert_image_dtype(outputs_reshaped, dtype=tf.uint16, saturate=True)
 
-    input_batch = tf.image.convert_image_dtype(examples_inputs**(1/2.2), dtype=tf.uint16, saturate=True)
     rerender_batch = tf.image.convert_image_dtype(net_rerender**(1/2.2), dtype=tf.uint16, saturate=True)
     display_fetches = {
-    "inputs": tf.map_fn(tf.image.encode_png, input_batch, dtype=tf.string, name="input_pngs"),        
-    "rerenders": tf.map_fn(tf.image.encode_png, rerender_batch, dtype=tf.string, name="rerender_pngs"),
+    # "inputs": tf.map_fn(tf.image.encode_png, input_batch, dtype=tf.string, name="input_pngs"),
+    "shaded": tf.map_fn(tf.image.encode_png, rerender_batch, dtype=tf.string, name="rerender_pngs"),
     "outputs": tf.map_fn(tf.image.encode_png, converted_outputs, dtype=tf.string, name="output_pngs"),   
     }
     return display_fetches
 
 def save_images(fetches, output_dir, step=None, mode="images"):
-    image_dir = os.path.join(output_dir, mode)
+    image_dir = output_dir
     if not os.path.exists(image_dir):
         os.makedirs(image_dir)
 
@@ -122,21 +133,9 @@ def save_images(fetches, output_dir, step=None, mode="images"):
     for i in range(BATCH_SIZE):
 
         fileset = {"step": step}
-        #fetch inputs
-        kind = "inputs"
-        filename = "batch"+ str(i)+"-" + kind +".png"
-        if step is not None:
-            filename = "%05d-%s" % (step, filename)
-        fileset[kind] = filename
-        out_path = os.path.join(image_dir, filename)
-        contents = fetches[kind][i]
-        with open(out_path, "wb") as f:
-            f.write(contents)
         #fetch rerenders
-        kind = "rerenders"
-        filename = "batch"+ str(i)+"-" + kind +".png"
-        if step is not None:
-            filename = "%05d-%s" % (step, filename)
+        kind = "shaded"
+        filename = kind +".png"
         fileset[kind] = filename
         out_path = os.path.join(image_dir, filename)
         contents = fetches[kind][i]
@@ -146,9 +145,16 @@ def save_images(fetches, output_dir, step=None, mode="images"):
         #fetch outputs
         for kind in ["outputs"]:
             for idImage in range(nbTargets):
-                filename = "batch"+ str(i)+"-"+ kind + "-" + str(idImage) + "-.png"
-                if step is not None:
-                    filename = "%05d-%s" % (step, filename)
+                if idImage == 0:
+                    filename = 'normal'
+                elif idImage == 1:
+                    filename = 'diffuse'
+                elif idImage == 2:
+                    filename = 'roughness'
+                elif idImage == 3:
+                    filename = 'specular'
+
+                filename = filename + ".png"
                 filetsetKey = kind + str(idImage)
                 fileset[filetsetKey] = filename
                 out_path = os.path.join(image_dir, filename)
@@ -224,31 +230,22 @@ def main():
     g_loss_summary = tf.summary.scalar("g_loss", gnr_cost)
     d_loss_summary = tf.summary.scalar("d_loss", dis_cost)
     train_summary = tf.summary.merge([g_loss_summary,d_loss_summary])
-    train_writer = tf.summary.FileWriter(args.log_dir, sess.graph)
-     
+
     saver = tf.train.Saver(max_to_keep=10)
     sess.run([examples.iterator.initializer,tf.global_variables_initializer()])
      
     for step in range(args.max_step):
-    
-        for i in range(5):        
+
+        for i in range(5):
             _, g_loss = sess.run([gnr_optimizer, gnr_cost])
         for i in range(1):
             _, g_loss = sess.run([gds_optimizer, gds_cost])
             
         _, d_loss = sess.run([d_optimizer, dis_cost]) 
-        
+
         if step % 500 == 0 or (step + 1) == args.max_step:
             print('Step %d,  g_loss = %.4f, d_loss = %.4f' %(step, g_loss, d_loss))
-            summary_str = sess.run(train_summary)         
-            train_writer.add_summary(summary_str, step)
         if step % 1000 == 0 or (step + 1) == args.max_step:
-            checkpoint_path = os.path.join(args.log_dir, 'model.ckpt')
-            saver.save(sess, checkpoint_path, global_step=step)
-            display_fetches = save_outputs(predictions,examples_flashes,net_rerender)
-            results = sess.run(display_fetches)
-            save_images(results, args.output_dir, step, "training_tiles")
-
             prediction_fetches = predict()
             predict_maps = sess.run(prediction_fetches)
             save_images(predict_maps, args.output_dir, step, "predicted_maps")
